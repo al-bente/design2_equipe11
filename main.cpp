@@ -1,18 +1,22 @@
 #include <Arduino.h>
-#include <TimerOne.h>
 
 #define CALIB_SAMPLES 5
 #define SAMPLING_PERIOD 1000 // time period between two samples in µs
 #define SHUNT_GAIN 20
+#define RESOLUTION 1024
+#define BAUD 115200
 
 
-const int pwmPin = 7;
+const int pwmPin = 6;
 const int posPin = A0;
 const int massPin = A1;
+const int cmdPin = A2;
 
-int command = 0;
+
+
+uint8_t command = 0;
 int tare = 0;
-int pose = 0;
+uint16_t pose = 0;
 int current = 0;
 
 
@@ -20,7 +24,7 @@ int readPose(){
   return analogRead(posPin);
 }
 
-void sendCommand(int PWM)
+void sendCommand(uint8_t PWM)
 {
   analogWrite(pwmPin,PWM);
 }
@@ -31,49 +35,36 @@ int readCurrent(){
   return current;
 }
 
-int readSerial(){
+int readCommand(){
 
-  if (Serial.available() > 0)
-  {
-    float cmd = Serial.parseFloat();
+  uint8_t cmd = analogRead(A2) >> 2;
 
-    cmd = constrain(cmd, 2.5f , -2.5f);
+  return cmd;
 
-    float pwm_percent = cmd / 2.5;
 
-    int pwm_ammount = (int)(255 * pwm_percent);
-
-    return pwm_ammount;
-  }
-
-  else return command;
 }
 
 
-
-void publishSerial(float send_pos, float send_current){
+void publishSerial(uint16_t send_pos, float send_current, uint8_t send_cmd){
 
 
   struct Packet {
-  float current_pose;
+  uint16_t header;
+  uint16_t current_pose;
   float current_meas;
+  uint8_t current_cmd;
   
-};
+  };
 
-Packet pkt;
-pkt.current_pose = send_pos;
-pkt.current_meas = send_current;
+  Packet pkt;
+  pkt.header = 0xABCD;
+  pkt.current_pose = send_pos;
+  pkt.current_meas = send_current;
+  pkt.current_cmd = send_cmd;
 
-Serial.write((uint8_t*)&pkt, sizeof(pkt));
-
-  if (Serial.available() < 0)
-  {
-    Serial.write((uint8_t*)&pkt, sizeof(pkt));
+  Serial.write((uint8_t*)&pkt, sizeof(pkt));
 
   }
-
-}
-
 
 
 void poseInterrupt(){
@@ -84,8 +75,9 @@ void setup() {
   pinMode(pwmPin, OUTPUT);
   pinMode(posPin, INPUT);
   pinMode(massPin, INPUT);
+  pinMode(cmdPin, INPUT);
 
-  Serial.begin(9600);
+  Serial.begin(BAUD);
   Serial.setTimeout(100);
 
   for (int calib = 0; calib < CALIB_SAMPLES; calib++) {
@@ -94,25 +86,24 @@ void setup() {
   
   tare /= CALIB_SAMPLES;
 
-  Timer1.initialize(SAMPLING_PERIOD);
-  Timer1.attachInterrupt(poseInterrupt);
-
 }
+
 
 
 
 void loop()
- {
-  command = readSerial();
-  readPose();
-  readCurrent();
+ {   
+
+  current = readCurrent();
+
+  pose = readPose();
+  
+  command = readCommand();
 
   sendCommand(command);
 
-  publishSerial(pose, current);
+  publishSerial(pose, current, command);
 
   delay(50);
 
-  
 }
-

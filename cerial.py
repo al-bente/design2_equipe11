@@ -1,25 +1,35 @@
-#!/usr/bin/env python3
-
 import serial
-import time
+import struct
+
+PORT = "/dev/ttyACM0"
+BAUD = 115200
+
+HEADER = b'\xCD\xAB'   # little-endian 0xABCD
+PACKET_SIZE = 9
 
 
-ser = serial.Serial(
-    port='/dev/ttyACM0',
-    baudrate=9600,
-    timeout=1
-)
+ser = serial.Serial(PORT, BAUD, timeout=1)
+
+buffer = b""
+
+print("Listening...")
 
 while True:
+    buffer += ser.read(64)
 
-    try:
+    while len(buffer) >= PACKET_SIZE:
+        idx = buffer.find(HEADER)
 
-        data = ser.read(128)
-        print(data)
+        if idx == -1:
+            buffer = buffer[-1:]  # keep last byte only
+            break
 
-    except Exception as e:
-        print("Something went wrong:", e)
-        break
+        if len(buffer) < idx + PACKET_SIZE:
+            break
 
+        packet = buffer[idx:idx + PACKET_SIZE]
+        buffer = buffer[idx + PACKET_SIZE:]
 
-ser.close()
+        _, pose, current, cmd = struct.unpack('<HHfB', packet)
+
+        print(f"Pose: {pose}, Current: {current:.2f}, Cmd: {cmd}")
