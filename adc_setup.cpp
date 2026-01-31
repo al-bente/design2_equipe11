@@ -1,15 +1,18 @@
 #include <Arduino.h>
 
-#define FS_HZ 1000
 #define BAUD 115200
 
+#define K_P 1
+#define K_I 1
+#define K_D 1
 
-#define MODE_ASSERV 1
-#define MODE_STEP   2
-#define MODE 
+#define diff_look_back 1
+#define int_lookback 100
 
-volatile uint16_t adcRead[3];
-volatile uint8_t currentChannel = 0;
+
+bool adcReady = false;
+uint16_t adcData = 0;
+
 
 ISR(TIMER1_COMPA_vect){
 
@@ -20,9 +23,8 @@ ISR(TIMER1_COMPA_vect){
 
 ISR(ADC_vect){
 
-  adcRead[1] = ADC;
-  currentChannel = ((currentChannel + 1) % 3);
-  ADMUX = (ADMUX & 0xF8) | currentChannel;
+  adcData = ADC; // Reading the adc values on after the other
+  adcReady = true;  // Flag to read the data
 
 }
 
@@ -32,12 +34,19 @@ void setup_ADC(){
   cli();
 
   ADMUX = (1 << REFS0);
-  ADCSRA = (1 << ADEN) | (1 << ADIE) | (1 << ADPS2) | (1 << ADPS1);
-  ADCSRB = 0;
+  ADCSRA = (1 << ADEN) 
+           | (1 << ADIE) 
+           | (1 << ADPS2)   // Setting the prescaler for 16 MHz
+           | (1 << ADPS1)
+           | (1 << ADPS0); // 
+
+
+
+  ADCSRB = 0; // Manual interrrupt trigger
 
   TCCR1A = 0;
-  TCCR1B = (1 << WGM12) | (1 << CS12) | (1 << ADPS1);
-  OCR1A = 15624;
+  TCCR1B = (1 << WGM12) | (1 << CS12);
+  OCR1A = 1599;
   TIMSK1 |= (1 << OCIE1A);
 
   sei();
@@ -46,25 +55,40 @@ void setup_ADC(){
 
 
 
-void setup_PWM(){
 
-
-}
-
+float error = 0;
+float pose = 0;
+float mass = 0;
 
 
 void setup() {
 
-Serial.begin(BAUD);
-Serial.setTimeout(5);
-setup_ADC();
+  Serial.begin(BAUD);
+  Serial.setTimeout(100);
+
+
+
+  setup_ADC();
 
 
 }
+
 
 
 void loop(){
 
+  if(adcReady){
+    cli(); // cli and sei stop the interrupts for a moment to allow serial publishing check cerial.py for plots
+    adcReady = false;
+
+    Serial.println(adcData);
+    sei();
+
+  }
+
 
 
 }
+
+
+
