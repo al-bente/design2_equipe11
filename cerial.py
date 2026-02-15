@@ -1,35 +1,52 @@
 import serial
-import struct
+import matplotlib.pyplot as plt
+import threading
 
-PORT = "/dev/ttyACM0"
+# ===== CHANGE THIS TO YOUR PORT =====
+# PORT = 'COM3'
+PORT = '/dev/ttyACM0'
 BAUD = 115200
 
-HEADER = b'\xCD\xAB'   # little-endian 0xABCD
-PACKET_SIZE = 9
+ser = serial.Serial(PORT, BAUD)
+
+data = []
+stop_flag = False
 
 
-ser = serial.Serial(PORT, BAUD, timeout=1)
+def keyboard_listener():
+    global stop_flag
+    while True:
+        key = input()
+        if key.lower() == 'p':
+            stop_flag = True
 
-buffer = b""
 
-print("Listening...")
+# Start keyboard thread
+thread = threading.Thread(target=keyboard_listener, daemon=True)
+thread.start()
+
+print("Recording... Type 'p' + Enter to plot. Recording resumes automatically.")
 
 while True:
-    buffer += ser.read(64)
+    if stop_flag:
+        if data:
+            plt.figure()
+            plt.plot(data)
+            plt.xlabel("Sample")
+            plt.ylabel("Value")
+            plt.title("Output")
+            plt.show()
 
-    while len(buffer) >= PACKET_SIZE:
-        idx = buffer.find(HEADER)
+        # Reset for next capture
+        data.clear()
+        stop_flag = False
+        print("Recording restarted...")
 
-        if idx == -1:
-            buffer = buffer[-1:]  # keep last byte only
-            break
+    line = ser.readline().decode(errors='ignore').strip()
 
-        if len(buffer) < idx + PACKET_SIZE:
-            break
-
-        packet = buffer[idx:idx + PACKET_SIZE]
-        buffer = buffer[idx + PACKET_SIZE:]
-
-        _, pose, current, cmd = struct.unpack('<HHfB', packet)
-
-        print(f"Pose: {pose}, Current: {current:.2f}, Cmd: {cmd}")
+    if line:
+        try:
+            value = int(float(line))
+            data.append(value)
+        except ValueError:
+            pass

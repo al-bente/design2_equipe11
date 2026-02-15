@@ -1,109 +1,129 @@
 #include <Arduino.h>
 
-#define CALIB_SAMPLES 5
-#define SAMPLING_PERIOD 1000 // time period between two samples in µs
-#define SHUNT_GAIN 20
-#define RESOLUTION 1024
 #define BAUD 115200
 
+#define FS 1000.0f
+#define Ts (1.0f / FS)
 
-const int pwmPin = 6;
-const int posPin = A0;
-const int massPin = A1;
-const int cmdPin = A2;
+// PID (±127) sortie pour un arduino UNO 
+#define PWM_MAX 127.0f  
 
+#define K_P 0.05f
+#define K_I 0.01f    
+#define K_D 0.0f
 
+#define I_CLAMP 80.0f
+#define DECAY 0.99995f
 
-uint8_t command = 0;
-int tare = 0;
-uint16_t pose = 0;
-int current = 0;
+volatile uint16_t pose_raw = 0;
+volatile bool sample_ready = false;
 
+float integral = 0.0f;
+float last_error = 0.0f;
+float d_filtered = 0.0f;
 
-int readPose(){
-  return analogRead(posPin);
-}
+int16_t target = 512;
 
-void sendCommand(uint8_t PWM)
+ISR(TIMER1_COMPA_vect)
 {
-  analogWrite(pwmPin,PWM);
+    ADCSRA |= (1 << ADSC);
 }
 
-int readCurrent(){
-  int current = SHUNT_GAIN * analogRead(massPin);
-
-  return current;
+ISR(ADC_vect)
+{
+    pose_raw = ADC;
+    sample_ready = true;
 }
 
-int readCommand(){
+void setup_ADC()
+{
+    cli();
 
-  uint8_t cmd = analogRead(A2) >> 2;
+    ADMUX = (1 << REFS0);
 
-  return cmd;
+    ADCSRA =
+        (1 << ADEN) |
+        (1 << ADIE) |
+        (1 << ADPS2) |
+        (1 << ADPS1) |
+        (1 << ADPS0);
 
+    ADCSRB = 0;
 
+    // Timer1 @ 1kHz
+    TCCR1A = 0;
+    TCCR1B = (1 << WGM12) | (1 << CS11);
+    OCR1A = 1599;
+
+    TIMSK1 |= (1 << OCIE1A);
+
+    sei();
 }
 
+void setup_PWM()
+{
+    pinMode(6, OUTPUT);
 
-void publishSerial(uint16_t send_pos, float send_current, uint8_t send_cmd){
+    TCCR0A = 0;
+    TCCR0B = 0;
 
+    TCCR0A |= (1 << COM0A1);
+    TCCR0A |= (1 << WGM01) | (1 << WGM00);
+    TCCR0B |= (1 << CS00);
 
-  struct Packet {
-  uint16_t header;
-  uint16_t current_pose;
-  float current_meas;
-  uint8_t current_cmd;
-  
-  };
-
-  Packet pkt;
-  pkt.header = 0xABCD;
-  pkt.current_pose = send_pos;
-  pkt.current_meas = send_current;
-  pkt.current_cmd = send_cmd;
-
-  Serial.write((uint8_t*)&pkt, sizeof(pkt));
-
-  }
-
-
-void poseInterrupt(){
-  pose = readPose();
+    OCR0A = 127;
 }
 
-void setup() {
-  pinMode(pwmPin, OUTPUT);
-  pinMode(posPin, INPUT);
-  pinMode(massPin, INPUT);
-  pinMode(cmdPin, INPUT);
-
-  Serial.begin(BAUD);
-  Serial.setTimeout(100);
-
-  for (int calib = 0; calib < CALIB_SAMPLES; calib++) {
-    tare += readPose();
-  }
-  
-  tare /= CALIB_SAMPLES;
-
+void setup()
+{
+    Serial.begin(BAUD);
+    setup_PWM();
+    setup_ADC();
 }
-
-
-
 
 void loop()
- {   
+{
+    if (sample_ready)
+    {
+        sample_ready = false;
 
-  current = readCurrent();
+        // Flip sensor
+        int16_t pose = 1023 - (int16_t)pose_raw;
 
-  pose = readPose();
-  
-  command = readCommand();
+        float error = (float)(target - pose);
 
-  sendCommand(command);
 
-  publishSerial(pose, current, command);
+        // Perte de mémoire de l'intégrateur pour augmenter la résistance au perturbations
+        integral = DECAY * integral +
+                   (Ts * 0.5f) * (error + last_error);
 
-  delay(50);
 
+        // D
+        float d_raw = (error - last_error) * FS;
+        d_filtered = 0.9f * d_filtered + 0.1f * d_raw;
+
+        float pid =
+            K_P * error +
+            K_I * integral +
+            K_D * d_filtered;
+
+        // Saturation de la commande
+        if (pid > PWM_MAX)  pid = PWM_MAX;
+        if (pid < -PWM_MAX) pid = -PWM_MAX;
+
+        last_error = error;
+
+        // Changement de range vers PWM
+        uint8_t pwm = (uint8_t)(pid + 127.0f);
+        OCR0A = pwm;
+
+        // Debug
+        static uint16_t debugCntr = 0;
+        if (++debugCntr >= 10)
+        {
+            debugCntr = 0;
+            // Modifié cette ligne pour modifié la sortie du arduino en serie
+            Serial.println(pid);
+        }
+    }
 }
