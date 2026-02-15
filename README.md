@@ -24,3 +24,4 @@ Pour rouler ce code sur Windows aller dans les premières lignes du code comment
 
 Ensuite faites cette commande dans le terminal `python3 cerial.py ` 
 
+à chaque fois que vous aller appuyer sur p et enter dans le terminal une nouvelle courbe sera imprimer avec les dernières valeures publier depuis la dernière courbe
