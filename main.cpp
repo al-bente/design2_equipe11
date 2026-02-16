@@ -2,18 +2,18 @@
 
 #define BAUD 115200
 
-#define FS 1000.0f
+#define FS 5000.0f
 #define Ts (1.0f / FS)
 
 // PID (±127) sortie pour un arduino UNO 
 #define PWM_MAX 127.0f  
 
-#define K_P 0.05f
-#define K_I 0.01f    
-#define K_D 0.0f
+#define K_P 0.00f
+#define K_I 0.2f    
+#define K_D 0.000f
 
-#define I_CLAMP 80.0f
-#define DECAY 0.99995f
+#define I_CLAMP 1024.0f
+#define DECAY 1.0f
 
 volatile uint16_t pose_raw = 0;
 volatile bool sample_ready = false;
@@ -53,7 +53,7 @@ void setup_ADC()
     // Timer1 @ 1kHz
     TCCR1A = 0;
     TCCR1B = (1 << WGM12) | (1 << CS11);
-    OCR1A = 1599;
+    OCR1A = 399;
 
     TIMSK1 |= (1 << OCIE1A);
 
@@ -69,7 +69,7 @@ void setup_PWM()
 
     TCCR0A |= (1 << COM0A1);
     TCCR0A |= (1 << WGM01) | (1 << WGM00);
-    TCCR0B |= (1 << CS00);
+    TCCR0B |= (1 << CS01);  // Prescaler 8: 16MHz / 8 / 256 ≈ 7.8kHz (closest to 5kHz with 8-bit)
 
     OCR0A = 127;
 }
@@ -92,11 +92,21 @@ void loop()
 
         float error = (float)(target - pose);
 
-
+        // Ajustement de l'erreur pour la commande
+        error = (error/512) * 127;
+  
         // Perte de mémoire de l'intégrateur pour augmenter la résistance au perturbations
-        integral = DECAY * integral +
-                   (Ts * 0.5f) * (error + last_error);
-
+        // Empêche l'intégrateur d'accumuler de l'erreur qu'il ne peut pas corriger
+        if (fabs(error) >= 4.0f)
+        {
+            integral = DECAY * integral +
+                       (Ts * 0.5f) * (error + last_error);
+        }
+        else
+        {
+            integral = integral;
+        }
+        
 
         // D
         float d_raw = (error - last_error) * FS;
@@ -107,7 +117,7 @@ void loop()
             K_I * integral +
             K_D * d_filtered;
 
-        // Saturation de la commande
+        // // Saturation de la commande
         if (pid > PWM_MAX)  pid = PWM_MAX;
         if (pid < -PWM_MAX) pid = -PWM_MAX;
 
@@ -123,7 +133,8 @@ void loop()
         {
             debugCntr = 0;
             // Modifié cette ligne pour modifié la sortie du arduino en serie
-            Serial.println(pid);
+            Serial.println(pose);
         }
+
     }
 }
