@@ -1,102 +1,123 @@
-
 #include <Arduino.h>
 
 #define BAUD 115200
 
-#define FS 2500.0f
-#define Ts (1.0f / FS)
+#define FS_POSE 50.0f
+#define FS_COURANT 1000.0f
+#define Ts_POSE (1.0f / FS_POSE)
+#define Ts_COURANT (1.0f / FS_COURANT)
 
-// ADC to Voltage conversion
-#define ADC_MAX 1023.0f
+// ADC
+#define ADC_MAX 2047.0f
 #define VREF 5.0f
-#define ADC_TO_VOLTAGE (VREF / ADC_MAX)
 
-// PID (±512) sortie pour PWM 10 bits
-#define PWM_MAX 511.0f  
+#define OVERSAMPLE_COUNT 4
+#define OVERSAMPLE_SHIFT 1
 
-#define K_P 2.0f
-#define K_I 15.0f    
-#define K_D 1.0f
-#define I_CLAMP 500.0f
-#define DECAY 1.0f
+#define PWM_MAX 1023
 
-enum CMD_MODES
-{
-  PID,
-  step,
-};
+// ===== GAINS =====
+#define K_P 0.01f
+#define K_I_pose 1.5f
+#define K_D 0.1f
 
-int mode = step;
+#define K_P_CURRENT 0.5f
+#define K_I_CURRENT 2.0f
 
-// Coefficient (polynomial: a_0 + a_1*v + a_2*v^2 + a_3*v^3)
-float coeff_pos[] = {10.34696548f, -2.85973280f,  0.29530878f, -0.01586919f};
+// ===== HYSTERESIS =====
+#define INT_DEADBAND 1.0f
+#define CURRENT_DEADBAND 0.5f
 
-float coeff_cour[] = {-2.5, 1.333333};
+// ===== LISSAGE CONSIGNE COURANT (0.0 → rapide, 1.0 → très lent) =====
+#define TARGET_SMOOTHING 0.95f
 
-uint8_t coeff_pos_count = sizeof(coeff_pos) / sizeof(coeff_pos[0]);
+int16_t target = 1050;
 
+// ===== VARIABLES =====
 volatile uint16_t pose_raw = 0;
 volatile uint16_t courant_raw = 0;
-volatile bool sample_ready = false;
-volatile uint8_t adc_channel = 6;  // 0 = A0 (courant), 6 = A6 (pose)
+volatile bool pose_ready = false;
+volatile bool courant_ready = false;
 
+volatile uint8_t adc_channel = 6;
+volatile uint8_t adc_cycle = 0;
+
+volatile uint16_t pose_accum = 0;
+volatile uint8_t  pose_count = 0;
+volatile uint16_t courant_accum = 0;
+volatile uint8_t  courant_count = 0;
+
+// ===== PID =====
 float integral = 0.0f;
-float last_error = 0.0f;
-float d_filtered = 0.0f;
+bool integral_locked = false;
 
-uint8_t error_index = 0;
+float integral_current = 0.0f;
+bool integral_current_locked = false;
 
-// Now in mm instead of 10 bit
-float target = 6.0f;
-float debug = 0;
+int16_t last_error = 0;
+int16_t last_error_current = 0;
 
+float target_current_f = 1024;
+int16_t target_current = 1024;
+
+int16_t last_pwm = 0;
+int16_t print_pose = 0;
+
+// ===== FILTRES =====
+int16_t pose_filtered = 0;
+int16_t courant_filtered = 0;
+
+// ===== ISR =====
 ISR(TIMER1_COMPA_vect)
 {
-    ADCSRA |= (1 << ADSC);   // Start ADC conversion
+    ADCSRA |= (1 << ADSC);
 }
 
 ISR(ADC_vect)
 {
+    uint16_t val = ADC;
+
     if (adc_channel == 6)
     {
-        pose_raw = ADC;
+        pose_accum += val;
+        if (++pose_count >= OVERSAMPLE_COUNT)
+        {
+            pose_raw = pose_accum >> OVERSAMPLE_SHIFT;
+            pose_accum = 0;
+            pose_count = 0;
+            pose_ready = true;
+        }
     }
-    else if (adc_channel == 0)
+    else
     {
-        courant_raw = ADC;
+        courant_accum += val;
+        if (++courant_count >= OVERSAMPLE_COUNT)
+        {
+            courant_raw = courant_accum >> OVERSAMPLE_SHIFT;
+            courant_accum = 0;
+            courant_count = 0;
+            courant_ready = true;
+        }
     }
-    
-    // Switch channel for next conversion
-    adc_channel = (adc_channel == 6) ? 0 : 6;
-    ADMUX = (ADMUX & 0xF0) | (adc_channel & 0x0F);
-    
-    sample_ready = true;
+
+    adc_cycle++;
+    if (adc_cycle >= 21) adc_cycle = 0;
+
+    adc_channel = (adc_cycle == 0) ? 6 : 0;
+    ADMUX = (ADMUX & 0xF0) | adc_channel;
 }
 
+// ===== SETUP =====
 void setup_ADC()
 {
     cli();
 
-    // -------- SELECT A6 --------
-    // A6 = ADC6
-    // MUX5 = 0 (ADCSRB)
-    // MUX[3:0] = 0110 (ADMUX)
+    ADMUX  = (1 << REFS0) | 6;
+    ADCSRA = (1 << ADEN) | (1 << ADIE) | 7;
 
-    ADMUX  = (1 << REFS0) | 6;    // AVcc reference, ADC6
-    ADCSRB = 0;                   // Select channels 0–7 → ADC6
-
-    ADCSRA =
-        (1 << ADEN) |   // Enable ADC
-        (1 << ADIE) |   // Interrupt enable
-        (1 << ADPS2) |
-        (1 << ADPS1) |
-        (1 << ADPS0);   // Prescaler 128
-
-    // -------- TIMER1 @ 2.5kHz --------
     TCCR1A = 0;
-    TCCR1B = (1 << WGM12) | (1 << CS11); 
-
-    OCR1A = 399;
+    TCCR1B = (1 << WGM12) | (1 << CS11);
+    OCR1A = 475;
 
     TIMSK1 |= (1 << OCIE1A);
 
@@ -107,157 +128,146 @@ void setup_PWM()
 {
     pinMode(5, OUTPUT);
 
-    TCCR3A = 0;
-    TCCR3B = 0;
+    TCCR3A = (1 << WGM30) | (1 << WGM31) | (1 << COM3A1);
+    TCCR3B = (1 << WGM32) | (1 << CS30);
 
-    // Fast PWM 10-bit
-    TCCR3A |= (1 << WGM30) | (1 << WGM31);
-    TCCR3B |= (1 << WGM32);
-
-    // Non-inverting PWM
-    TCCR3A |= (1 << COM3A1);
-
-    // Prescaler 8
-    TCCR3B |= (1 << CS31);
-
-    OCR3A = 512;
-}
-
-void setup_MODE()
-{
-    // Optional serial mode selection
+    OCR3A = 1024;
 }
 
 void setup()
 {
     Serial.begin(BAUD);
-
-    pinMode(13, OUTPUT);
-
-    setup_MODE();
     setup_PWM();
     setup_ADC();
 }
 
-float derivation(float current_error)
+// ===== UTIL =====
+float integration(float area, float err, float prev_err, float dt, bool *locked)
 {
-    
-    float d_raw = (current_error - last_error) / FS;
-    
-    // filter
-    d_filtered = (0.9f * d_filtered + 0.1f * d_raw);
-    return d_filtered;
-}
+    float abs_err = fabs(err);
 
-float integration(float area, float new_error, float previous_error)
-{
-        area = DECAY * area + (Ts * 0.5f) * (new_error + previous_error);
-    
+    // Hystérésis
+    if (*locked)
+    {
+        if (abs_err > INT_DEADBAND * 1.5f)
+            *locked = false;
+        else
+            return area;
+    }
+    else
+    {
+        if (abs_err <= INT_DEADBAND)
+        {
+            *locked = true;
+            return area;
+        }
+    }
 
-    if (area > I_CLAMP) area = I_CLAMP;
-    if (area < -I_CLAMP) area = -I_CLAMP;
+    // intégration trapèze (sans Ki ici)
+    area += (err + prev_err) * 0.5f * dt;
+
+    // clamp sécurité
+    if (area > PWM_MAX) area = PWM_MAX;
+    if (area < -PWM_MAX) area = -PWM_MAX;
 
     return area;
 }
 
-float Bits_to_voltage(uint16_t bits)
+float clamp_output(float value, float limit)
 {
-    // 10-bit ADC (0-1023) to voltage (0-5V)
-    return (float)bits * ADC_TO_VOLTAGE;
+    if (value > limit) return limit;
+    if (value < -limit) return -limit;
+    return value;
 }
 
-float Voltage_to_amps(uint16_t sensor){
-    // Convert sensor reading to voltage (0-5V)
-    float voltage = Bits_to_voltage(sensor);
-
-    voltage = voltage + coeff_cour[0];
-
-    // Linear conversion: amps = coeff_cour[0] + coeff_cour[1] * voltage
-    float result =voltage * coeff_cour[1];
-
-    return result;
-}
-
-float Voltage_to_mm(uint16_t sensor)
+// ===== POSITION PID =====
+int16_t regulateur_position(int16_t consigne, int16_t mesure)
 {
-    // Convert sensor reading to voltage (0-5V)
-    float voltage = Bits_to_voltage(sensor);
-    
-    float result = 0.0f;
-    float power = 1.0f;  // x^0
-    
-    for (uint8_t i = 0; i < coeff_pos_count; i++)
-    {
-        result += coeff_pos[i] * power;
-        power *= voltage;  // Update power using voltage value
-    }
-    
-    return result;
+    int16_t error = consigne - mesure;
+
+    integral = integration(integral, error, last_error, Ts_POSE, &integral_locked);
+
+    float deriv = (error - last_error) / Ts_POSE;
+
+    float out = K_P * error + K_I_pose * integral - K_D * deriv;
+
+    last_error = error;
+
+    return (int16_t)clamp_output(out, PWM_MAX);
 }
+
+// ===== CURRENT PI =====
+int16_t regulateur_courant(int16_t consigne, int16_t mesure)
+{
+    int16_t error = consigne - mesure;
+
+    integral_current = integration(integral_current, error, last_error_current, Ts_COURANT, &integral_current_locked);
+
+    float p_gain = (fabs(error) <= CURRENT_DEADBAND) ? 0.0f : K_P_CURRENT;
+
+    float out = p_gain * error + K_I_CURRENT * integral_current;
+
+    last_error_current = error;
+
+    return (int16_t)clamp_output(out, PWM_MAX);
+}
+
+// ===== LOOP =====
+int32_t courant_last = 0;
 
 void loop()
 {
-    if (sample_ready)
+    // ===== COURANT =====
+    if (courant_ready)
     {
-        sample_ready = false;
+        courant_ready = false;
 
-        // Get position in mm from raw sensor data
-        float pose = Voltage_to_mm(pose_raw);
+        int16_t pid = regulateur_courant(target_current, courant_raw);
 
-        float error = (float)(target - pose);
-
-        error = K_P * error;
-
-        integral = integration(integral, error, last_error);
-
-        float d = derivation(error);
-
-        float pid =
-            error +
-            K_I * integral +
-            K_D * d;
-
-        // Saturation
-        if (pid > PWM_MAX)  pid = PWM_MAX;
-        if (pid < -PWM_MAX) pid = -PWM_MAX;
-
-        last_error = error;
-
-        // Convert signed PID to 10-bit PWM
-        int16_t pwm = (int16_t)(pid + 512);
+        int16_t pwm = pid + 1024;
+        last_pwm = pwm;
 
         if (pwm < 0) pwm = 0;
-        if (pwm > 1023) pwm = 1023;
-
-
-        if(mode == step) pwm = 512; 
+        if (pwm > 2047) pwm = 2047;
 
         OCR3A = pwm;
 
-        // Send data packet: handshake, courant, pose, pid, error, handshake
-        static uint8_t dataCntr = 0;
-        if (++dataCntr >= 1)
-        {
-            float courant = Voltage_to_amps(courant_raw);
-            
-            // Start handshake
-            Serial.write(255);
-            
-            // Send data as comma-separated values
-            Serial.print(courant);
-            Serial.print(",");
-            Serial.print(pose);
-            Serial.print(",");
-            Serial.print(pid);
-            Serial.print(",");
-            Serial.println(error);
-            
-            // End handshake
-            Serial.write(254);
-            
-            dataCntr = 0;
-        }
-    }
-    
+        courant_last = courant_raw;
 
+
+    }
+
+    // ===== POSITION =====
+    if (pose_ready)
+    {
+        pose_ready = false;
+
+        int16_t pose = 2047 - pose_raw;
+
+        int16_t pid_pos = regulateur_position(target, pose);
+
+        target_current_f = TARGET_SMOOTHING * target_current_f
+                         + (1.0f - TARGET_SMOOTHING) * (pid_pos + 1024);
+
+        target_current = (int16_t)target_current_f;
+        print_pose = pose;
+    }
+
+    // ===== SERIAL =====
+    static uint8_t dataCntr = 0;
+    if (++dataCntr >= 5)
+    {
+
+        Serial.write(255);
+        Serial.print(courant_last - 1024);
+        Serial.print(",");
+        Serial.print(print_pose);
+        Serial.print(",");
+        Serial.print(last_pwm);
+        Serial.print(",");
+        Serial.println(target - print_pose);
+        Serial.write(254);
+
+        dataCntr = 0;
+    }
 }

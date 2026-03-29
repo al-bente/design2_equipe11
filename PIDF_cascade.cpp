@@ -15,7 +15,7 @@
 #define PWM_MAX 510.0f  
 
 // Position PID parameters (unchanged)
-#define K_P 2.5f
+#define K_P 1.5f
 #define K_I 10.0f    
 #define K_D 15.0f
 // Anti-windup: PWM_MAX / K_I to prevent saturation
@@ -29,7 +29,7 @@
 #define I_CLAMP_CURRENT (PWM_MAX / K_I_CURRENT)  // = 511 / 25 ≈ 20.4f
 #define DECAY_CURRENT 1.0f
 // Filter coefficient for position signal (0.0-1.0): higher = more filtering
-#define POSE_FILTER_COEFF 0.98f
+#define POSE_FILTER_COEFF 0.9f
 
 enum CMD_MODES
 {
